@@ -77,6 +77,10 @@ class OpenAIModelName(str, enum.Enum):
     GPT4_32k = GPT4_ROLLING_32k
     GPT4_O = GPT4_O_ROLLING
 
+    # CUSTOM ENTRIES FOR o1-mini AND GPT4_O_LATEST
+    O1_MINI = "o1-mini"           # Smart LLM
+    GPT4_O_LATEST = "gpt-4o-2024-11-20"  # Fast LLM or newest gpt4-o version
+
 
 OPEN_AI_EMBEDDING_MODELS = {
     info.name: info
@@ -105,10 +109,10 @@ OPEN_AI_EMBEDDING_MODELS = {
     ]
 }
 
-
 OPEN_AI_CHAT_MODELS = {
     info.name: info
     for info in [
+        # Existing GPT-3.5 / GPT-4 / GPT-4o entries
         ChatModelInfo(
             name=OpenAIModelName.GPT3_v1,
             provider_name=ModelProviderName.OPENAI,
@@ -170,11 +174,29 @@ OPEN_AI_CHAT_MODELS = {
             provider_name=ModelProviderName.OPENAI,
             prompt_token_cost=5 / 1_000_000,
             completion_token_cost=15 / 1_000_000,
-            max_tokens=128_000,
+            max_tokens=128000,
+            has_function_call_api=True,
+        ),
+        # ADD YOUR CUSTOM MODELS HERE
+        ChatModelInfo(
+            name=OpenAIModelName.O1_MINI,
+            provider_name=ModelProviderName.OPENAI,
+            prompt_token_cost=0.001 / 1000,      # example cost
+            completion_token_cost=0.002 / 1000,    # example cost
+            max_tokens=8192,                     # or your desired limit
+            has_function_call_api=True,          # if o1-mini supports function calls
+        ),
+        ChatModelInfo(
+            name=OpenAIModelName.GPT4_O_LATEST,
+            provider_name=ModelProviderName.OPENAI,
+            prompt_token_cost=0.005 / 1000,      # example cost
+            completion_token_cost=0.015 / 1000,    # example cost
+            max_tokens=128000,
             has_function_call_api=True,
         ),
     ]
 }
+
 # Copy entries for models with equivalent specs
 chat_model_mapping = {
     OpenAIModelName.GPT3_v1: [OpenAIModelName.GPT3_v2],
@@ -214,7 +236,6 @@ OPEN_AI_MODELS: Mapping[
 
 class OpenAICredentials(ModelProviderCredentials):
     """Credentials for OpenAI."""
-
     api_key: SecretStr = UserConfigurable(from_env="OPENAI_API_KEY")  # type: ignore
     api_base: Optional[SecretStr] = UserConfigurable(
         default=None, from_env="OPENAI_API_BASE_URL"
@@ -281,7 +302,6 @@ class OpenAICredentials(ModelProviderCredentials):
 
     def _get_azure_access_kwargs(self, model: str) -> dict[str, str]:
         """Get the kwargs for the Azure API."""
-
         if not self.azure_model_to_deploy_id_map:
             raise ValueError("Azure model deployment map not configured")
 
@@ -328,7 +348,7 @@ class OpenAIProvider(
         if self._credentials.api_type == SecretStr("azure"):
             from openai import AsyncAzureOpenAI
 
-            # API key and org (if configured) are passed, the rest of the required
+            # API key and org (if configured) are passed; the rest of the required
             # credentials is loaded from the environment by the AzureOpenAI client.
             self._client = AsyncAzureOpenAI(
                 **self._credentials.get_api_access_kwargs()  # type: ignore
@@ -352,9 +372,7 @@ class OpenAIProvider(
             messages = [messages]
 
         if model_name.startswith("gpt-3.5-turbo"):
-            tokens_per_message = (
-                4  # every message follows <|start|>{role/name}\n{content}<|end|>\n
-            )
+            tokens_per_message = 4  # every message follows <|start|>{role/name}\n{content}<|end|>\n
             tokens_per_name = -1  # if there's a name, the role is omitted
         # TODO: check if this is still valid for gpt-4o
         elif model_name.startswith("gpt-4"):
@@ -363,7 +381,7 @@ class OpenAIProvider(
         else:
             raise NotImplementedError(
                 f"count_message_tokens() is not implemented for model {model_name}.\n"
-                "See https://github.com/openai/openai-python/blob/120d225b91a8453e15240a49fb1c6794d8119326/chatml.md "  # noqa
+                "See https://github.com/openai/openai-python/blob/120d225b91a8453e15240a49fb1c6794d8119326/chatml.md "
                 "for information on how messages are converted to tokens."
             )
         tokenizer = self.get_tokenizer(model_name)
@@ -386,29 +404,33 @@ class OpenAIProvider(
         max_output_tokens: Optional[int] = None,
         **kwargs,
     ) -> tuple[
-        list[ChatCompletionMessageParam], CompletionCreateParams, dict[str, Any]
+        list[ChatCompletionMessageParam],
+        CompletionCreateParams,
+        dict[str, Any]
     ]:
-        """Prepare keyword arguments for an OpenAI chat completion call
-
-        Args:
-            prompt_messages: List of ChatMessages
-            model: The model to use
-            functions (optional): List of functions available to the LLM
-            max_output_tokens (optional): Maximum number of tokens to generate
-
-        Returns:
-            list[ChatCompletionMessageParam]: Prompt messages for the OpenAI call
-            CompletionCreateParams: Mapping of other kwargs for the OpenAI call
-            Mapping[str, Any]: Any keyword arguments to pass on to the completion parser
         """
+        Prepare keyword arguments for an OpenAI chat completion call.
+        """
+        # If we’re calling o1-mini, rename any system messages to assistant
+        # because o1-mini doesn't support the system role.
+        if model == OpenAIModelName.O1_MINI:
+            for i, msg in enumerate(prompt_messages):
+                if msg.role == "system":
+                    prompt_messages[i] = ChatMessage(
+                        role="assistant",
+                        content=msg.content,
+                        name=getattr(msg, "name", None)  # Use None if msg has no 'name'
+                    )
+
+        # Also handle function calls if needed.
         tools_compat_mode = False
         if functions:
             if not OPEN_AI_CHAT_MODELS[model].has_function_call_api:
-                # Provide compatibility with older models
                 _functions_compat_fix_kwargs(functions, prompt_messages)
                 tools_compat_mode = True
                 functions = None
 
+        # Now call the superclass method.
         openai_messages, kwargs, parse_kwargs = super()._get_chat_completion_args(
             prompt_messages=prompt_messages,
             model=model,
@@ -416,6 +438,8 @@ class OpenAIProvider(
             max_output_tokens=max_output_tokens,
             **kwargs,
         )
+
+        # Provide final model info, Azure info if needed, etc.
         kwargs.update(self._credentials.get_model_access_kwargs(model))  # type: ignore
 
         if tools_compat_mode:
@@ -453,16 +477,13 @@ class OpenAIProvider(
         kwargs.update(self._credentials.get_model_access_kwargs(model))  # type: ignore
         return kwargs
 
-    _get_embedding_kwargs.__doc__ = (
-        BaseOpenAIEmbeddingProvider._get_embedding_kwargs.__doc__
-    )
+    _get_embedding_kwargs.__doc__ = BaseOpenAIEmbeddingProvider._get_embedding_kwargs.__doc__
 
     def _retry_api_request(self, func: Callable[_P, _T]) -> Callable[_P, _T]:
         _log_retry_debug_message = tenacity.after_log(self._logger, logging.DEBUG)
 
         def _log_on_fail(retry_state: tenacity.RetryCallState) -> None:
             _log_retry_debug_message(retry_state)
-
             if (
                 retry_state.attempt_number == 0
                 and retry_state.outcome
@@ -512,7 +533,6 @@ def format_function_specs_as_typescript_ns(
     } // namespace functions
     ```
     """
-
     return (
         "namespace functions {\n\n"
         + "\n\n".join(format_openai_function_for_prompt(f) for f in functions)
@@ -527,14 +547,13 @@ def format_openai_function_for_prompt(func: CompletionModelFunction) -> str:
     Example:
     ```ts
     // Get the current weather in a given location
-    type get_current_weather = (_: {
+    type get_current_weather = (_ :{
     // The city and state, e.g. San Francisco, CA
     location: string,
     unit?: "celsius" | "fahrenheit",
     }) => any;
     ```
     """
-
     def param_signature(name: str, spec: JSONSchema) -> str:
         return (
             f"// {spec.description}\n" if spec.description else ""
@@ -555,7 +574,7 @@ def count_openai_functions_tokens(
 ) -> int:
     """Returns the number of tokens taken up by a set of function definitions
 
-    Reference: https://community.openai.com/t/how-to-calculate-the-tokens-when-using-function-call/266573/18  # noqa: E501
+    Reference: https://community.openai.com/t/how-to-calculate-the-tokens-when-using-function-call/266573/18
     """
     return count_tokens(
         "# Tools\n\n"

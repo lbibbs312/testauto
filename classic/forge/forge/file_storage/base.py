@@ -187,44 +187,37 @@ class FileStorage(ABC):
             observer.join()
             shutil.rmtree(local_path)
 
-    def _sanitize_path(
-        self,
-        path: str | Path,
-    ) -> Path:
+    def _sanitize_path(self, path: str | Path) -> Path:
         """Resolve the relative path within the given root if possible.
 
         Parameters:
-            relative_path: The relative path to resolve.
+            path: The path to resolve.
 
         Returns:
-            Path: The resolved path.
+            Path: The resolved absolute path.
 
         Raises:
-            ValueError: If the path is absolute and a root is provided.
-            ValueError: If the path is outside the root and the root is restricted.
+            ValueError: If an absolute path is provided that is not within the storage root.
+            ValueError: If the path contains an embedded null byte.
         """
-
-        # Posix systems disallow null bytes in paths. Windows is agnostic about it.
-        # Do an explicit check here for all sorts of null byte representations.
+        # Check for null bytes
         if "\0" in str(path):
             raise ValueError("Embedded null byte")
 
         logger.debug(f"Resolving path '{path}' in storage '{self.root}'")
+        path_obj = Path(path)
 
-        relative_path = Path(path)
+        # If an absolute path is provided:
+        if os.path.isabs(path):
+            # Allow it if it's exactly equal to self.root or a subpath of self.root.
+            if self.restrict_to_root and not (path_obj == self.root or path_obj.is_relative_to(self.root)):
+                raise ValueError(
+                    "Attempted to access absolute path '{}' outside of storage '{}'".format(path, self.root)
+                )
+            return path_obj
 
-        # Allow absolute paths if they are contained in the storage.
-        if (
-            relative_path.is_absolute()
-            and self.restrict_to_root
-            and not relative_path.is_relative_to(self.root)
-        ):
-            raise ValueError(
-                f"Attempted to access absolute path '{relative_path}' "
-                f"in storage '{self.root}'"
-            )
-
-        full_path = self.root / relative_path
+        # Otherwise, if it's a relative path, join it with the storage root.
+        full_path = self.root / path_obj
         if self.is_local:
             full_path = full_path.resolve()
         else:
@@ -234,8 +227,7 @@ class FileStorage(ABC):
 
         if self.restrict_to_root and not full_path.is_relative_to(self.root):
             raise ValueError(
-                f"Attempted to access path '{full_path}' "
-                f"outside of storage '{self.root}'."
+                f"Attempted to access path '{full_path}' outside of storage '{self.root}'."
             )
 
         return full_path
